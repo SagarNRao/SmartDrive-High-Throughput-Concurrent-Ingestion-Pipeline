@@ -1,11 +1,11 @@
 import os
 from groq import Groq
 from process import get_chroma_collection
+from dotenv import load_dotenv
 
-# Configuration
-# Best practice: Export this in your shell as `export GROQ_API_KEY="your_key"`
-# Or explicitly pass it here: Groq(api_key="your_actual_api_key_here")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "your_actual_api_key_here")
+load_dotenv()
+
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 GROQ_MODEL = "llama-3.3-70b-versatile"
 
 # Initialize Groq client
@@ -68,6 +68,7 @@ def query_smart_drive(user_query: str, num_results: int = 4):
         print(f"[RAG Error] Failed to generate response from Groq API: {str(e)}")
 
 if __name__ == "__main__":
+    
     # Interactive query loop
     while True:
         query = input("Ask a question about your files (or type 'exit'): ").strip()
