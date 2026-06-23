@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+/server/client_secret.json
+/server/service_account.json
+/server/speed_rag_groq.py
