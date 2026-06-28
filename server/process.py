@@ -1,10 +1,13 @@
 import io
+import os
+import queue
 import chromadb
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-# Path where your local vector database files will reside
-CHROMA_DB_PATH = "./chroma_db"
+# Always resolve to project-root/chroma_db regardless of process cwd
+_SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+CHROMA_DB_PATH = os.path.join(os.path.dirname(_SERVER_DIR), "chroma_db")
 COLLECTION_NAME = "smart_drive_collection"
 
 def get_chroma_collection():
@@ -72,19 +75,25 @@ def embed_and_store(file_payload: dict) -> None:
     metadatas = []
     ids = []
     
+    user_owner = file_payload.get("user_owner")
+    if not user_owner:
+        print(f"[Process] Missing user_owner for {file_name}. Skipping storage.")
+        return
+
     for idx, chunk in enumerate(chunks):
         documents.append(chunk)
         metadatas.append({
             "source_id": file_id,
             "file_name": file_name,
-            "chunk_index": idx
+            "chunk_index": idx,
+            "user_owner": user_owner,
         })
         # Unique ID combining file ID and its structural slice sequence
         ids.append(f"{file_id}_chunk_{idx}")
         
-    # Chroma handles embedding generation natively via sentence-transformers under the hood
+    # Upsert so re-syncs refresh metadata (e.g. user_owner) for existing chunk IDs
     if documents:
-        collection.add(
+        collection.upsert(
             documents=documents,
             metadatas=metadatas,
             ids=ids
@@ -106,9 +115,10 @@ def processing_worker(download_queue, stop_event) -> None:
             # Signal back that item processing completed
             download_queue.task_done()
             
-        except Exception:
-            # Check if main orchestration marked extraction loop as finished
-            if stop_event.is_set() and download_queue.empty():
-                print("[Process Pool] Queue drained and ingest finished. Worker spinning down.")
-                break
-            continue
+        except Exception as e:
+            if not (stop_event.is_set() and download_queue.empty()):
+                if not isinstance(e, queue.Empty):
+                    print(f"[Process Pool Error] {e}")
+                continue
+            print("[Process Pool] Queue drained and ingest finished. Worker spinning down.")
+            break

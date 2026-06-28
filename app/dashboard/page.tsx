@@ -10,18 +10,34 @@ export default function Dashboard() {
   const [aiResponse, setAiResponse] = useState("")
 
   const triggerSyncPipeline = async () => {
-    setSyncStatus("Invoking thread execution runtime...")
+    if (!session?.user?.email) {
+      setSyncStatus("Session not ready. Refresh the page and try again.")
+      return
+    }
+    const accessToken = (session as any)?.accessToken
+    if (!accessToken) {
+      setSyncStatus("No Google access token. Sign out and sign back in, then retry.")
+      return
+    }
+    if (!folderId.trim()) {
+      setSyncStatus("Paste a Google Drive folder ID first.")
+      return
+    }
+
+    setSyncStatus("Starting sync...")
     try {
       const res = await fetch("http://localhost:8000/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          email: session?.user?.email, // Active login context forwarded
-          folder_id: folderId,
+          email: session.user.email,
+          folder_id: folderId.trim(),
+          access_token: accessToken,
+          refresh_token: (session as any)?.refreshToken ?? null,
         }),
       })
       const data = await res.json()
-      setSyncStatus(data.message)
+      setSyncStatus(data.status === "error" ? data.message : data.message)
     } catch {
       setSyncStatus("Failed connecting to Python backend.")
     }
@@ -38,8 +54,23 @@ export default function Dashboard() {
           query: query,
         }),
       })
-      const data = await res.json()
-      setAiResponse(data.answer)
+      // Log status for debugging
+      console.log("/query response status:", res.status)
+
+      // Try to parse JSON, but fallback to plain text for visibility
+      const text = await res.text()
+      let data: any = null
+      try {
+        data = JSON.parse(text)
+      } catch (e) {
+        console.warn("/query: response not JSON, using raw text", e)
+      }
+
+      console.log("/query raw response:", text)
+
+      // Prefer structured answer, else show raw text
+      const answer = data?.answer ?? text ?? "(no answer returned)"
+      setAiResponse(answer)
     } catch {
       setAiResponse("Pipeline query failure.")
     }

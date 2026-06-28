@@ -33,7 +33,7 @@ def fetch_all_file_ids(service, folder_id: str) -> list:
             
     return files
 
-def download_single_file(file_info: dict, creds: Credentials, download_queue) -> None:
+def download_single_file(file_info: dict, creds: Credentials, download_queue, user_email: str) -> None:
     """Worker function: Downloads a single file's bytes using user credentials."""
     file_id = file_info['id']
     file_name = file_info['name']
@@ -61,7 +61,8 @@ def download_single_file(file_info: dict, creds: Credentials, download_queue) ->
             "id": file_id,
             "name": file_name,
             "mime_type": mime_type,
-            "bytes": file_bytes
+            "bytes": file_bytes,
+            "user_owner": user_email,
         }
         
         download_queue.put(payload)
@@ -70,12 +71,15 @@ def download_single_file(file_info: dict, creds: Credentials, download_queue) ->
     except Exception as e:
         print(f"[Ingest Error] Failed downloading {file_name}: {str(e)}")
 
-def start_parallel_downloads(file_list: list, creds: Credentials, download_queue, max_workers: int = 5):
+def start_parallel_downloads(file_list: list, creds: Credentials, download_queue, user_email: str, max_workers: int = 5):
     """Orchestrates concurrent I/O downloads passing user credentials down the pool."""
     print(f"[Ingest] Starting concurrent download pool with {max_workers} workers.")
     
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Use lambda to inject the active user credentials into the download workers cleanly
-        executor.map(lambda file: download_single_file(file, creds, download_queue), file_list)
+        executor.map(
+            lambda file: download_single_file(file, creds, download_queue, user_email),
+            file_list,
+        )
         
     print("[Ingest] All download threads have finished execution.")

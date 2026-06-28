@@ -2,52 +2,82 @@
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import os
 import queue
 import threading
-# In api.py, update your ingest imports to this:
-from ingest import get_drive_service, fetch_all_file_ids, start_parallel_downloads
+from dotenv import load_dotenv
 
 # Import your existing pipeline functions
+from ingest import get_drive_service, fetch_all_file_ids, start_parallel_downloads
 from process import processing_worker
 from rag import query_smart_drive
 
 from google.oauth2.credentials import Credentials
+
+load_dotenv()
+
+GOOGLE_CLIENT_ID = os.environ.get("AUTH_GOOGLE_ID")
+GOOGLE_CLIENT_SECRET = os.environ.get("AUTH_GOOGLE_SECRET")
+GOOGLE_TOKEN_URI = "https://oauth2.googleapis.com/token"
+DRIVE_SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+
+
+def build_google_credentials(access_token: str, refresh_token: str | None = None) -> Credentials:
+    return Credentials(
+        token=access_token,
+        refresh_token=refresh_token,
+        token_uri=GOOGLE_TOKEN_URI,
+        client_id=GOOGLE_CLIENT_ID,
+        client_secret=GOOGLE_CLIENT_SECRET,
+        scopes=DRIVE_SCOPES,
+    )
 
 app = FastAPI()
 
 # Allow your Next.js frontend to talk to this backend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"], # Next.js default port
+    allow_origins=["http://localhost:3000"],  # Next.js default local server port
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
+# FIXED: Ensure all properties have strict type annotations (: str)
 class SyncRequest(BaseModel):
     email: str
     folder_id: str
+    access_token: str
+    refresh_token: str | None = None
 
 class QueryRequest(BaseModel):
     email: str
     query: str
 
-def execution_pipeline(email: str, folder_id: str):
-    """Your updated multi-tenant multi-threaded pipeline execution logic"""
-    # Simply load standard credentials or generate temporary ones for execution boundaries
-    # To keep it completely simple, we initialize empty token parameters since your Next.js login 
-    # provides client authorization, or use a system fallback.
-    creds = Credentials(token=None) 
+def execution_pipeline(email: str, folder_id: str, access_token: str, refresh_token: str | None = None):
+    """Your multi-tenant multi-threaded pipeline execution logic"""
+    print(f"\n[Sync] Spawning data ingestion pipeline background task for {email}...")
     
-    drive_service = get_drive_service(creds)
-    files_to_download = fetch_all_file_ids(drive_service, folder_id)
+    creds = build_google_credentials(access_token, refresh_token)
     
-    if not files_to_download:
+    try:
+        drive_service = get_drive_service(creds)
+        files_to_download = fetch_all_file_ids(drive_service, folder_id)
+        
+        if not files_to_download:
+            print(f"[Sync] Zero processing candidates found inside folder: {folder_id}")
+            return
+            
+        print(f"[Sync] Extraction worker found {len(files_to_download)} files to parse.")
+    except Exception as e:
+        print(f"[Sync Error] Failed tracking cloud infrastructure constraints for {email}: {e}")
         return
 
+    # Initialize thread-safe shared system queues
     download_queue = queue.Queue(maxsize=15)
     stop_event = threading.Event()
 
+    # Spin up consumer background worker thread
     consumer_thread = threading.Thread(
         target=processing_worker, 
         args=(download_queue, stop_event),
@@ -55,23 +85,54 @@ def execution_pipeline(email: str, folder_id: str):
     )
     consumer_thread.start()
 
-    start_parallel_downloads(files_to_download, creds, download_queue, max_workers=5)
-    stop_event.set()
-    consumer_thread.join()
+    try:
+        # Launch producer worker thread pool handling parallel downloads
+        start_parallel_downloads(files_to_download, creds, download_queue, email, max_workers=5)
+    except Exception as e:
+        print(f"[Sync Error] Error executing parallel stream workflows for {email}: {e}")
+    finally:
+        # Gracefully teardown and join thread boundaries
+        stop_event.set()
+        consumer_thread.join()
+        print(f"[Sync] Ingestion pipeline execution successfully terminated for {email}.")
 
 
 @app.post("/sync")
 def sync_folder(data: SyncRequest, background_tasks: BackgroundTasks):
-    # BackgroundTasks runs your multi-threaded pipeline asynchronously 
-    # so the frontend doesn't hang waiting for the download to finish
-    background_tasks.add_task(execution_pipeline, data.email, data.folder_id)
-    return {"status": "processing", "message": f"Sync started for {data.email}"}
+    if not data.access_token:
+        return {
+            "status": "error",
+            "message": "Missing Google access token. Sign out and sign back in, then retry.",
+        }
+
+    if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+        return {
+            "status": "error",
+            "message": "Server missing AUTH_GOOGLE_ID / AUTH_GOOGLE_SECRET in .env.",
+        }
+
+    try:
+        creds = build_google_credentials(data.access_token, data.refresh_token)
+        get_drive_service(creds).files().list(pageSize=1, fields="files(id)").execute()
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Google Drive authentication failed: {e}",
+        }
+
+    background_tasks.add_task(
+        execution_pipeline,
+        data.email,
+        data.folder_id,
+        data.access_token,
+        data.refresh_token,
+    )
+    return {"status": "processing", "message": f"Sync started for {data.email}. This may take a minute."}
 
 @app.post("/query")
 def query_drive(data: QueryRequest):
-    # Pass user query to your rag.py script
-    # Note: Modify your rag.py query_smart_drive to return the string instead of just printing it
-    answer = query_smart_drive(data.query, active_user_email=data.email) 
+    # Pass user query to your rag.py search engine matrices
+    answer = query_smart_drive(data.query, active_user_email=data.email)
     return {"answer": answer}
 
 if __name__ == "__main__":
