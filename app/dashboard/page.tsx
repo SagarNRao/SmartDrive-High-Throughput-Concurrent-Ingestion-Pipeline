@@ -4,10 +4,20 @@ import { useSession, signOut } from "next-auth/react"
 
 export default function Dashboard() {
   const { data: session } = useSession()
-  const [folderId, setFolderId] = useState("")
+  const [folderInput, setFolderInput] = useState("")
   const [query, setQuery] = useState("")
   const [syncStatus, setSyncStatus] = useState("")
   const [aiResponse, setAiResponse] = useState("")
+
+  // Extracts the 33-character or similar Google Drive folder ID from a full URL or returns the raw input if it's already an ID
+  const extractFolderId = (input: string): string => {
+    const trimmed = input.trim()
+    // Matches patterns like drive.google.com/drive/folders/FOLDER_ID or drive.google.com/drive/u/0/folders/FOLDER_ID
+    const urlRegex = /\/folders\/([a-zA-Z0-9-_]{25,50})/
+    const match = trimmed.match(urlRegex)
+    
+    return match ? match[1] : trimmed
+  }
 
   const triggerSyncPipeline = async () => {
     if (!session?.user?.email) {
@@ -19,8 +29,16 @@ export default function Dashboard() {
       setSyncStatus("No Google access token. Sign out and sign back in, then retry.")
       return
     }
-    if (!folderId.trim()) {
-      setSyncStatus("Paste a Google Drive folder ID first.")
+    if (!folderInput.trim()) {
+      setSyncStatus("Paste a Google Drive folder URL or ID first.")
+      return
+    }
+
+    const folderId = extractFolderId(folderInput)
+    
+    // Quick validation on extracted ID format to catch obvious garbage inputs before hitting backend
+    if (!/^[a-zA-Z0-9-_]{25,50}$/.test(folderId)) {
+      setSyncStatus("Invalid Google Drive folder URL or ID format.")
       return
     }
 
@@ -31,7 +49,7 @@ export default function Dashboard() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           email: session.user.email,
-          folder_id: folderId.trim(),
+          folder_id: folderId,
           access_token: accessToken,
           refresh_token: (session as any)?.refreshToken ?? null,
         }),
@@ -54,10 +72,9 @@ export default function Dashboard() {
           query: query,
         }),
       })
-      // Log status for debugging
+      
       console.log("/query response status:", res.status)
 
-      // Try to parse JSON, but fallback to plain text for visibility
       const text = await res.text()
       let data: any = null
       try {
@@ -68,7 +85,6 @@ export default function Dashboard() {
 
       console.log("/query raw response:", text)
 
-      // Prefer structured answer, else show raw text
       const answer = data?.answer ?? text ?? "(no answer returned)"
       setAiResponse(answer)
     } catch {
@@ -95,12 +111,12 @@ export default function Dashboard() {
           <div className="flex gap-4">
             <input
               type="text"
-              placeholder="Paste Google Drive Folder ID"
-              value={folderId}
-              onChange={(e) => setFolderId(e.target.value)}
-              className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-4 py-2 text-white"
+              placeholder="Paste Google Drive Folder URL or ID"
+              value={folderInput}
+              onChange={(e) => setFolderInput(e.target.value)}
+              className="flex-1 bg-neutral-950 border border-neutral-800 rounded-lg px-4 py-2 text-white placeholder-neutral-500 text-sm focus:outline-none focus:border-blue-500 transition-colors"
             />
-            <button onClick={triggerSyncPipeline} className="bg-blue-600 hover:bg-blue-700 px-5 py-2 rounded-lg font-medium">
+            <button onClick={triggerSyncPipeline} className="bg-blue-600 hover:bg-blue-700 px-5 py-2 rounded-lg font-medium transition-colors text-sm">
               Initialize Sync
             </button>
           </div>
@@ -115,9 +131,9 @@ export default function Dashboard() {
             placeholder="Ask anything about your synced infrastructure context..."
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-4 text-white resize-none"
+            className="w-full bg-neutral-950 border border-neutral-800 rounded-lg p-4 text-white resize-none text-sm focus:outline-none focus:border-emerald-500 transition-colors"
           />
-          <button onClick={dispatchRAGQuery} className="mt-3 bg-emerald-600 hover:bg-emerald-700 px-5 py-2 rounded-lg font-medium">
+          <button onClick={dispatchRAGQuery} className="mt-3 bg-emerald-600 hover:bg-emerald-700 px-5 py-2 rounded-lg font-medium transition-colors text-sm">
             Execute Query
           </button>
           {aiResponse && (
