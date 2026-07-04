@@ -11,6 +11,7 @@ from dotenv import load_dotenv
 from ingest import get_drive_service, fetch_all_file_ids, start_parallel_downloads
 from process import processing_worker
 from rag import query_smart_drive
+from redis_client import ping_redis, close_redis_client, clear_session
 
 from google.oauth2.credentials import Credentials
 
@@ -43,6 +44,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.on_event("startup")
+async def on_startup():
+    # Just a friendly heads-up in the logs if Redis isn't reachable - the app
+    # still works fine without it (caching/session memory are best-effort).
+    await ping_redis()
+
+
+@app.on_event("shutdown")
+async def on_shutdown():
+    await close_redis_client()
+
+
 # FIXED: Ensure all properties have strict type annotations (: str)
 class SyncRequest(BaseModel):
     email: str
@@ -53,6 +67,11 @@ class SyncRequest(BaseModel):
 class QueryRequest(BaseModel):
     email: str
     query: str
+    session_id: str | None = None  # groups multi-turn chat memory in Redis; defaults to "default"
+
+class ClearSessionRequest(BaseModel):
+    email: str
+    session_id: str | None = None
 
 def execution_pipeline(email: str, folder_id: str, access_token: str, refresh_token: str | None = None):
     """Your multi-tenant multi-threaded pipeline execution logic"""
@@ -130,10 +149,25 @@ def sync_folder(data: SyncRequest, background_tasks: BackgroundTasks):
     return {"status": "processing", "message": f"Sync started for {data.email}. This may take a minute."}
 
 @app.post("/query")
-def query_drive(data: QueryRequest):
-    # Pass user query to your rag.py search engine matrices
-    answer = query_smart_drive(data.query, active_user_email=data.email)
-    return {"answer": answer}
+async def query_drive(data: QueryRequest):
+    # Pass user query to your rag.py search engine matrices.
+    # session_id groups multi-turn chat memory in Redis; falls back to "default"
+    # if the client doesn't send one (still works, just one shared thread per user).
+    session_id = data.session_id or "default"
+    answer, was_cached = await query_smart_drive(
+        data.query,
+        active_user_email=data.email,
+        session_id=session_id,
+    )
+    return {"answer": answer, "cached": was_cached}
+
+
+@app.post("/session/clear")
+async def clear_chat_session(data: ClearSessionRequest):
+    """Optional helper endpoint for a 'New Chat' button on the frontend."""
+    session_id = data.session_id or "default"
+    await clear_session(data.email, session_id)
+    return {"status": "ok"}
 
 if __name__ == "__main__":
     import uvicorn

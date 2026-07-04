@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 "use client"
 import { useState } from "react"
 import { useSession, signOut } from "next-auth/react"
@@ -8,6 +9,12 @@ export default function Dashboard() {
   const [query, setQuery] = useState("")
   const [syncStatus, setSyncStatus] = useState("")
   const [aiResponse, setAiResponse] = useState("")
+  const [wasCached, setWasCached] = useState(false)
+
+  // One chat "session" per browser tab load. Sent to the backend so multi-turn
+  // conversation memory in Redis is scoped to this session_id (and, server-side,
+  // to the signed-in user's email) instead of being shared across every tab/device.
+  const [sessionId] = useState<string>(() => crypto.randomUUID())
 
   // Extracts the 33-character or similar Google Drive folder ID from a full URL or returns the raw input if it's already an ID
   const extractFolderId = (input: string): string => {
@@ -15,7 +22,7 @@ export default function Dashboard() {
     // Matches patterns like drive.google.com/drive/folders/FOLDER_ID or drive.google.com/drive/u/0/folders/FOLDER_ID
     const urlRegex = /\/folders\/([a-zA-Z0-9-_]{25,50})/
     const match = trimmed.match(urlRegex)
-    
+
     return match ? match[1] : trimmed
   }
 
@@ -35,7 +42,7 @@ export default function Dashboard() {
     }
 
     const folderId = extractFolderId(folderInput)
-    
+
     // Quick validation on extracted ID format to catch obvious garbage inputs before hitting backend
     if (!/^[a-zA-Z0-9-_]{25,50}$/.test(folderId)) {
       setSyncStatus("Invalid Google Drive folder URL or ID format.")
@@ -63,6 +70,7 @@ export default function Dashboard() {
 
   const dispatchRAGQuery = async () => {
     setAiResponse("Querying index matrices...")
+    setWasCached(false)
     try {
       const res = await fetch("http://localhost:8000/query", {
         method: "POST",
@@ -70,9 +78,10 @@ export default function Dashboard() {
         body: JSON.stringify({
           email: session?.user?.email,
           query: query,
+          session_id: sessionId,
         }),
       })
-      
+
       console.log("/query response status:", res.status)
 
       const text = await res.text()
@@ -87,9 +96,26 @@ export default function Dashboard() {
 
       const answer = data?.answer ?? text ?? "(no answer returned)"
       setAiResponse(answer)
+      setWasCached(Boolean(data?.cached))
     } catch {
       setAiResponse("Pipeline query failure.")
     }
+  }
+
+  const startNewChat = async () => {
+    if (!session?.user?.email) return
+    try {
+      await fetch("http://localhost:8000/session/clear", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: session.user.email, session_id: sessionId }),
+      })
+    } catch {
+      // Non-fatal - if this fails, worst case is the old memory sticks around until its TTL expires.
+    }
+    setAiResponse("")
+    setQuery("")
+    setWasCached(false)
   }
 
   return (
@@ -125,7 +151,12 @@ export default function Dashboard() {
 
         {/* Semantic Search RAG Card */}
         <section className="bg-neutral-900 border border-neutral-800 p-6 rounded-xl">
-          <h2 className="text-lg font-semibold mb-3">Interactive Knowledge Interface</h2>
+          <div className="flex justify-between items-center mb-3">
+            <h2 className="text-lg font-semibold">Interactive Knowledge Interface</h2>
+            <button onClick={startNewChat} className="text-xs text-neutral-400 hover:text-neutral-200 underline underline-offset-2">
+              New chat
+            </button>
+          </div>
           <textarea
             rows={3}
             placeholder="Ask anything about your synced infrastructure context..."
@@ -138,7 +169,14 @@ export default function Dashboard() {
           </button>
           {aiResponse && (
             <div className="mt-4 p-4 bg-neutral-950 border border-neutral-800 rounded-lg">
-              <h3 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider mb-1">Engine Output</h3>
+              <div className="flex items-center justify-between mb-1">
+                <h3 className="text-xs font-semibold text-neutral-400 uppercase tracking-wider">Engine Output</h3>
+                {wasCached && (
+                  <span className="text-[10px] font-medium text-amber-400 uppercase tracking-wider">
+                    ⚡ from cache
+                  </span>
+                )}
+              </div>
               <p className="text-neutral-200 text-sm whitespace-pre-wrap">{aiResponse}</p>
             </div>
           )}
