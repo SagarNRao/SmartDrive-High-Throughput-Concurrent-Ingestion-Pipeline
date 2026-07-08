@@ -1,63 +1,108 @@
-Markdown
-# SmartDrive-Context-Engine
+# Smart Google Drive Engine (Better Drive)
 
-An asynchronous, high-throughput document ingestion pipeline built in Python to concurrently stream data from the Google Drive API directly into the Groq LLM inference context window.
+An asynchronous Retrieval-Augmented Generation (RAG) system that maps, indexes, and queries Google Drive folders in real-time. Built with a **Next.js** frontend and a specialized **FastAPI** backend featuring optimized local I/O thread pooling, isolated vector spaces, and multi-tenant Redis sliding-window memory caching.
 
-This engine bypasses the infrastructure overhead, indexing latency, and chunking fragmentation of traditional vector database setups by leveraging concurrent network I/O and large LLM context lengths (`llama-3.3-70b-versatile`) to deliver near-zero latency data retrieval.
+https://github.com/user-attachments/assets/2627c57d-f99a-4a7b-89b8-0d327c0b9996
 
-## System Architecture
+## 🏗️ Architecture & System Design
 
-The pipeline is optimized for high-performance network I/O and strict resource management:
+The system decouples intensive document ingestion from the user interaction lifecycle using a producer-consumer thread-safe processing model within FastAPI background execution contexts.
 
-[Google Drive Folder]
-│
-▼ (Scan Metadata)
-[fetch_folder_files]
-│
-▼ (Distribute to Tasks via Semaphore)
-[worker_download Pool] ──► (Concurrent In-Memory Streams)
-│
-▼ (Compile Aggregated Context Buffer)
-[Memory]
-│
-▼ (Direct Injection via HTTPS Post)
-[Groq API]
+```
+Next.js Frontend ──(HTTP Query / Sync)──> FastAPI Router
+    │
+    └─ Triggers Background Task
+       │
+       ├─ Thread-Safe Queue
+       │
+       ├─ Producer Thread Pool (5 Workers) ─> Google Drive API Downloads
+       │
+       └─ Consumer Thread ─────────────────> PDF Parsing & ChromaDB Upsert
+```
 
+### Technical Stack Detail
 
-* **Asynchronous Concurrency:** Built entirely on Python's `asyncio` event loop and `aiohttp` client sessions to eliminate blocking I/O operations during simultaneous network calls.
-* **Bounded Resource Pool:** Enforces thread-safe rate-limiting using an `asyncio.Semaphore` primitive to optimize parallel download throughput without triggering remote API rate limits (HTTP 429).
-* **Automated Session Lifecycle:** Integrates `google-auth` service account flows to handle on-demand token rotation, ensuring cryptographic validity across long-running ingestion batches.
+* **Frontend:** Next.js (App Router), TypeScript, Tailwind CSS, NextAuth.js (Google Provider)
+* **Backend Gateway:** FastAPI, Uvicorn, Pydantic data validation
+* **Vector Storage:** ChromaDB (Persistent local deployment utilizing metadata partition filtering)
+* **Language Model & Processing Engine:** Groq Cloud API (`llama-3.3-70b-versatile`), `pypdf`, and LangChain text splitters
+* **Caching & State Management:** Redis managed via Docker container for localized Q&A caching and multi-turn chat tracking
 
-## Core Prerequisites
+---
 
-* Python 3.10+
-* A Groq API Key
-* A Google Cloud Platform Service Account JSON key file (`service_account.json`) with the **Google Drive API** enabled.
+## 🚀 Core Features
 
-## Environment Configuration
+* **Dynamic OAuth Ingestion:** Authenticates on the fly using individual user session Google tokens to pull down protected drive folders
+* **Concurrent Ingestion Pipeline:** Uses a thread-safe `Queue` architecture. A pool of parallel producer threads downloads document streams entirely in-memory while a decoupled background consumer extracts text and commits vectors
+* **Strict Multi-Tenant Query Isolation:** Vector queries utilize specific metadata filters (`where={"user_owner": user_email}`) ensuring zero cross-tenant data leakage
+* **Sliding-Window Redis Chat History:** Multi-turn conversational memory handles complex relational follow-up queries. Active chats maintain a 2-hour sliding window TTL while identical query patterns trigger a 24-hour global Redis cache layer for sub-millisecond execution
 
-Create a `.env` file in the root directory to store your credentials securely:
+---
+
+## 📂 Repository Structure
+
+```
+.
+├── web/                      # Next.js frontend application
+│   └── app/
+│       └── dashboard/
+│           └── page.tsx      # Next.js workspace portal client UI
+└── backend/                  # Python FastAPI backend service
+    ├── main.py               # Local pipeline debugging entrypoint
+    ├── api.py                # Main FastAPI entry point & BackgroundTask worker routing
+    ├── redis_client.py       # Asynchronous Redis multi-tenant session & cache architecture
+    ├── ingest.py             # Concurrent Google Drive API byte-stream download pool
+    ├── process.py            # Local document parsing & ChromaDB persistence layer
+    └── rag.py                # Retrieval engine context matching & Groq inference pipeline
+```
+
+---
+
+## 🛠️ Local Setup & Execution
+
+### Prerequisites
+
+* Docker installed on your machine
+* Google Cloud Console Credentials (with Drive API and OAuth2 consent screen configured)
+* Groq API Key
+
+### 1. Environment Variables Configuration
+
+Create a `.env` file inside your backend root directory:
 
 ```env
-GROQ_API_KEY=your_groq_api_key_here
-Setup & Deployment
-Share Target Folder: Share your target Google Drive folder with the client_email listed inside your service_account.json file as a Viewer.
+AUTH_GOOGLE_ID=your_google_client_id
+AUTH_GOOGLE_SECRET=your_google_client_secret
+GROQ_API_KEY=your_groq_api_key
+REDIS_URL=redis://localhost:6379/0
+```
 
-Install Dependencies:
+### 2. Run the Application Infrastructure
 
-Bash
-pip install aiohttp python-dotenv google-auth
-Configure Target Constants: Update the following strings inside the script initialization block:
+Open three distinct terminal sessions to launch the ecosystem:
 
-Python
-FOLDER_ID = "your_google_drive_folder_id"
-SERVICE_ACCOUNT_FILE = "service_account.json"
-MAX_CONCURRENT_WORKERS = 3
-Execute Ingestion Loop:
+**Step 1: Start Redis Server (via Docker)**
 
-Bash
-python speed_rag_groq.py
-Performance & Scaling Notes
-In-Memory Optimization: Files are streamed directly into volatile memory buffers (io bytes text decoding) rather than being persisted to disk, maximizing processing speed and maintaining absolute isolation from host machine storage.
+Spin up the official isolated container for cache and state management:
 
-Context Budget: The pipeline is tuned for llama-3.3-70b-versatile with an effective 128k context window. For multi-gigabyte document corpora, scaling to an asynchronous database storage adapter (psycopg3 + pgvector) is recommended.
+```bash
+docker run -p 6379:6379 redis
+```
+
+**Step 2: Initialize FastAPI Backend Engine**
+
+Install project dependencies (`fastapi`, `redis`, `chromadb`, `groq`, `pypdf`, `langchain-text-splitters`) and run the core pipeline:
+
+```bash
+python api.py
+```
+
+**Step 3: Launch Next.js Interface**
+
+```bash
+cd web
+npm install
+npm run dev
+```
+
+Navigate to `http://localhost:3000` to link folders and test queries.
